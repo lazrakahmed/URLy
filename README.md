@@ -141,6 +141,64 @@ pair is in two GitHub secrets, the role ARN and region in repository variables; 
 in the repo. Switching to OIDC later is a few lines in the workflow. The database password
 never touches the pipeline.
 
+## Behavior under load
+
+**Test:** `loadtest/redirect.js` (k6) runs from a laptop against the public ALB address for about
+8.5 minutes: 95% redirects (`GET /{code}`, 302 not followed) and 5% link creation, ramping from 10
+to 50, 100 and 200 virtual users (2 minutes per step), after creating a pool of 200 links.
+Targets: redirect p95 under 300 ms and under 1% errors. Between runs the API service was reset
+by hand to its minimum of 2 tasks so every run starts from the same baseline.
+
+```bash
+k6 run -e BASE_URL=http://<alb-dns-name> --summary-export loadtest/results/run.json loadtest/redirect.js
+```
+
+| | Run 1 | Run 2 | Run 3 (after the change below) |
+| -- | -- | -- | -- |
+| Autoscaling | CPU target tracking | same | target tracking + step scaling |
+| Requests (rate) | 64,332 (130/s) | 61,903 (125/s) | **111,299 (225/s)** |
+| Errors | 0% | 0% | 0% |
+| Redirect median | 86 ms | 88 ms | 82 ms |
+| Redirect p95 / max | 2.45 s / 4.9 s | 2.49 s / 5.0 s | **1.40 s** / 3.2 s |
+| CPU above 50% until a new task was requested | ~4.4 min | ~4.4 min | **~1.8 min** |
+| p95 < 300 ms target | missed | missed | missed |
+
+Raw numbers are in `loadtest/results/` (k6 summaries, the autoscaling timeline sampled every 20 s,
+and a CloudWatch dashboard screenshot of the three runs).
+
+**What happened.** The app never returned an error and most requests stayed fast (median
+~85 ms), but the tail latency grew whenever the running tasks were saturated. The API tasks are
+small (0.25 vCPU) and reached about 75% CPU at roughly 100 users, so requests queued.
+Autoscaling worked but reacted late: with CPU target tracking alone it took about 4.4 minutes
+from "CPU over 50%" to a new task being requested (CloudWatch needs three consecutive
+one-minute readings, then Fargate needs about a minute to start a task). Runs 1 and 2 behaved the
+same, so the result is repeatable.
+
+**What was changed, and what it did.** After two runs I added a step-scaling policy on a
+one-minute alarm (add 1, 2 or 3 tasks depending on how far CPU is above 50%); target tracking
+stays for the slow scale-in. In run 3 the service asked for 4 tasks about 1.8 minutes after CPU
+crossed 50% and reached 6 (the configured maximum) near the end of the test. Throughput nearly
+doubled and p95 fell from ~2.45 s to 1.40 s. The target was still missed: the ramp outran the
+capacity twice (2 starting tasks, then 4 tasks at 200 users). I stopped tuning there rather than
+adjust the test until it passed.
+
+**Where it bends next: the database has headroom, for now.** During run 3 RDS CPU peaked at 17.8%
+and open connections at 35 (limit about 100; 6 tasks x 10 connections = 60 is the design ceiling).
+The `db.t4g.micro` is burstable and its CPU credit balance stayed near zero (3 to 6 credits), so
+sustained higher load would hit the database CPU next, and adding API tasks would not help.
+
+**What I would do next, in order of effort**
+1. Bigger or more tasks at the start (0.5 vCPU, or a minimum of 4): the cheapest fix for this
+   exact result. Scheduled scale-up if the traffic peak is predictable.
+2. Cache redirect lookups: links never change, so an in-process cache, then Redis, takes most
+   reads off the database.
+3. Bigger or non-burstable database instance; a connection pooler (RDS Proxy or PgBouncer) once
+   there are many tasks; read replicas for redirects.
+4. Take redirects off the origin: CloudFront with caching (a 301 or `Cache-Control` loses
+   per-click visibility); or a key-value store (DynamoDB) for the code-to-URL mapping.
+5. Run the load generator inside AWS (a Fargate task) to remove the laptop and home network
+   from the measurement.
+
 ## Observability
 
 **Health endpoints**
