@@ -24,8 +24,12 @@ const SHORT = [
   { duration: "10s", target: 0 },
 ];
 
+const PROFILES = { full: FULL, short: SHORT };
+const PROFILE = __ENV.PROFILE || "full";
+if (!PROFILES[PROFILE]) throw new Error(`PROFILE must be "full" or "short", got "${PROFILE}"`);
+
 export const options = {
-  stages: __ENV.PROFILE === "short" ? SHORT : FULL,
+  stages: PROFILES[PROFILE],
   thresholds: {
     "http_req_duration{name:redirect}": ["p(95)<300"],
     http_req_failed: ["rate<0.01"],
