@@ -1,0 +1,29 @@
+# planning docs and exercise material (not part of the deliverable)
+/CLAUDE.md
+/CONTEXT.md
+/docs/
+/task/
+/task.md
+/*.png
+/*.jpg
+/*.jpeg
+
+# secrets and local config
+.env
+*.tfvars
+!*.tfvars.example
+
+# python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+
+.DS_Store
