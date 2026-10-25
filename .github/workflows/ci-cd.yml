@@ -1,0 +1,156 @@
+name: ci-cd
+
+# Push to main: test -> build+scan -> push -> migrate -> deploy -> smoke test.
+# Pull requests: test and build only (no AWS access).
+# Manual run with image_tag: redeploy (roll back to) an image that is already in ECR.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Existing image tag (git SHA) to deploy, e.g. to roll back. Skips tests and build."
+        required: false
+        default: ""
+
+permissions:
+  contents: read # nothing else; add `id-token: write` only when switching to OIDC
+
+concurrency:
+  # one deploy at a time; the next push waits instead of racing
+  group: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.ref) || 'deploy' }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+
+jobs:
+  test:
+    if: ${{ inputs.image_tag == '' }}
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: urly
+          POSTGRES_PASSWORD: urly-test
+          POSTGRES_DB: urly_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U urly -d urly_test" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # full history for the secret scan
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: API tests and lint
+        working-directory: api
+        run: |
+          pip install uv
+          uv sync --frozen
+          uv run ruff check .
+          uv run ruff format --check .
+          uv run pytest -q
+      - uses: hashicorp/setup-terraform@v4
+      - name: Terraform format and validate
+        run: |
+          terraform fmt -check -recursive infra
+          for dir in infra infra/bootstrap; do
+            terraform -chdir=$dir init -backend=false -input=false
+            terraform -chdir=$dir validate
+          done
+      - name: Secret scan (gitleaks)
+        run: docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.30.1 detect --source /repo --no-banner
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: tag
+        run: echo "tag=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+      - name: Build images (tagged with the commit, never "latest")
+        run: |
+          docker build -t urly-api:${{ steps.tag.outputs.tag }} api
+          docker build -t urly-ui:${{ steps.tag.outputs.tag }} ui
+      - name: "Vulnerability scan (Trivy), fail on CRITICAL/HIGH that have a fix"
+        run: |
+          for image in urly-api urly-ui; do
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.76.1 \
+              image --exit-code 1 --severity CRITICAL,HIGH --ignore-unfixed --no-progress \
+              $image:${{ steps.tag.outputs.tag }}
+          done
+      # Everything below needs AWS and therefore never runs for pull requests.
+      - name: AWS credentials (short-lived role session, not the stored key itself)
+        if: ${{ github.event_name != 'pull_request' }}
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          role-skip-session-tagging: true
+          role-duration-seconds: 3600
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Push to ECR
+        if: ${{ github.event_name != 'pull_request' }}
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      - name: Push images
+        if: ${{ github.event_name != 'pull_request' }}
+        run: |
+          for image in urly-api urly-ui; do
+            remote=${{ steps.ecr.outputs.registry }}/$image:${{ steps.tag.outputs.tag }}
+            if aws ecr describe-images --repository-name $image --image-ids imageTag=${{ steps.tag.outputs.tag }} >/dev/null 2>&1; then
+              echo "$image:${{ steps.tag.outputs.tag }} already in ECR, skipping"
+            else
+              docker tag $image:${{ steps.tag.outputs.tag }} $remote
+              docker push $remote
+            fi
+          done
+
+  deploy:
+    needs: [build]
+    # runs after a successful build, or directly for a manual redeploy of an existing tag
+    if: >-
+      ${{ !cancelled() && github.event_name != 'pull_request' &&
+      (needs.build.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.image_tag != '')) }}
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.image_tag || needs.build.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          role-skip-session-tagging: true
+          role-duration-seconds: 3600
+          aws-region: ${{ vars.AWS_REGION }}
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_wrapper: false
+      - name: Terraform init
+        run: terraform -chdir=infra init -input=false
+      - name: Migrate the database (one-off ECS task, before the new code starts)
+        run: |
+          # point the migrate task at the new image first, then run it
+          terraform -chdir=infra apply -auto-approve -input=false \
+            -target=aws_ecs_task_definition.migrate -var image_tag=$TAG \
+            -var db_multi_az=${{ vars.DB_MULTI_AZ || 'false' }}
+          scripts/migrate.sh
+      - name: Deploy (Terraform apply, ECS rolling update with circuit breaker)
+        run: |
+          terraform -chdir=infra apply -auto-approve -input=false -var image_tag=$TAG \
+            -var db_multi_az=${{ vars.DB_MULTI_AZ || 'false' }}
+          aws ecs wait services-stable --cluster urly --services api ui
+      - name: Smoke test the public URL
+        run: scripts/smoke-test.sh "$(terraform -chdir=infra output -raw url)"

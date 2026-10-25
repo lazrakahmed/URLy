@@ -175,7 +175,7 @@ resource "aws_iam_role_policy" "deploy" {
         Sid    = "ProjectRolesOnly"
         Effect = "Allow"
         Action = [
-          "iam:CreateRole", "iam:DeleteRole", "iam:GetRole", "iam:UpdateRole", "iam:TagRole", "iam:UntagRole",
+          "iam:CreateRole", "iam:DeleteRole", "iam:GetRole", "iam:UpdateRole", "iam:TagRole", "iam:UntagRole", "iam:ListRoleTags",
           "iam:PutRolePolicy", "iam:GetRolePolicy", "iam:DeleteRolePolicy", "iam:ListRolePolicies",
           "iam:ListAttachedRolePolicies", "iam:ListInstanceProfilesForRole"
         ]

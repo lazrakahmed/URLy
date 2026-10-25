@@ -36,20 +36,7 @@ terraform -chdir=infra init -input=false
 terraform -chdir=infra apply -input=false -auto-approve -var "image_tag=$TAG" -var "db_multi_az=$MULTI_AZ"
 
 echo "==> 4/5 database migration (one-off ECS task)"
-CLUSTER=$(terraform -chdir=infra output -raw cluster_name)
-TASKDEF=$(terraform -chdir=infra output -raw migrate_task_definition)
-SUBNETS=$(terraform -chdir=infra output -json task_subnets | python3 -c 'import sys,json; print(",".join(json.load(sys.stdin)))')
-SG=$(terraform -chdir=infra output -raw task_security_group)
-TASK_ARN=$(aws ecs run-task --region "$REGION" --cluster "$CLUSTER" --launch-type FARGATE \
-  --task-definition "$TASKDEF" \
-  --network-configuration "awsvpcConfiguration={subnets=[$SUBNETS],securityGroups=[$SG],assignPublicIp=ENABLED}" \
-  --query 'tasks[0].taskArn' --output text)
-[ -n "$TASK_ARN" ] && [ "$TASK_ARN" != "None" ] || { echo "The migration task did not start (check subnets, security group, capacity)." >&2; exit 1; }
-aws ecs wait tasks-stopped --region "$REGION" --cluster "$CLUSTER" --tasks "$TASK_ARN"
-EXIT_CODE=$(aws ecs describe-tasks --region "$REGION" --cluster "$CLUSTER" --tasks "$TASK_ARN" \
-  --query 'tasks[0].containers[0].exitCode' --output text)
-[ "$EXIT_CODE" = "0" ] || { echo "Migration failed (exit code $EXIT_CODE). See log group /ecs/urly" >&2; exit 1; }
-echo "migration ok"
+scripts/migrate.sh
 
 echo "==> 5/5 smoke test"
 URL=$(terraform -chdir=infra output -raw url)
