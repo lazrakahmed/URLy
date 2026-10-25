@@ -25,3 +25,9 @@ variable "alarm_email" {
   default     = "lazrak.edu@gmail.com"
   description = "Where alarm emails go (SNS subscription; confirm it once by clicking the link)"
 }
+
+variable "max_tasks" {
+  type        = number
+  default     = 6
+  description = "Autoscaling ceiling for the API. 6 tasks x 10 DB connections = 60, below the ~100 the db.t4g.micro allows"
+}
