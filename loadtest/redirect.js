@@ -1,10 +1,12 @@
-// k6 load test: ~95% redirects, ~5% link creation.
+// k6 load test: ~95% redirects, ~5% link creation. BASE_URL is required.
 //   k6 run -e BASE_URL=http://localhost:8080 -e PROFILE=short loadtest/redirect.js   (rehearsal)
 //   k6 run -e BASE_URL=http://<alb-dns-name> --summary-export loadtest/results/run.json loadtest/redirect.js
 import http from "k6/http";
 import { check } from "k6";
 
-const BASE_URL = (__ENV.BASE_URL || "http://localhost:8080").replace(/\/$/, "");
+// No default on purpose: forgetting it must fail, not silently load-test your laptop.
+if (!__ENV.BASE_URL) throw new Error("BASE_URL is required, e.g. -e BASE_URL=http://<alb-dns-name>");
+const BASE_URL = __ENV.BASE_URL.replace(/\/$/, "");
 const POOL_SIZE = 200;
 
 // Full run (~8 min): warm-up 10 users, then 50, 100, 200 users, ramp down.

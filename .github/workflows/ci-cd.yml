@@ -7,7 +7,7 @@ name: ci-cd
 on:
   push:
     branches: [main]
-    paths-ignore: ["**.md"]
+    paths-ignore: ["**.md", "loadtest/**"] # docs and load-test changes do not redeploy
   pull_request:
   workflow_dispatch:
     inputs:
