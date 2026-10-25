@@ -53,6 +53,67 @@ All settings are environment variables (see `.env.example`): `DB_HOST`, `DB_PORT
 There are no secrets in the repo or in the images; locally they come from `.env`, on AWS from
 Secrets Manager.
 
+## Build and deploy
+
+The app runs on AWS in `eu-north-1`: an Application Load Balancer in front of two ECS Fargate
+services (`api`, `ui`, 2 tasks each, one per availability zone), Postgres on RDS in private
+subnets, images in ECR, CloudWatch for logs, metrics and alarms. Everything is Terraform.
+
+```
+internet -> ALB (HTTP :80) -> /, /app.js, /style.css -> ui tasks
+                           -> /api/*, /{code}        -> api tasks -> RDS (private subnets)
+```
+
+Terraform is in two parts:
+
+| Folder | What it holds | Lifetime |
+| -- | -- | -- |
+| `infra/bootstrap/` | state bucket (S3), ECR repositories, CI deploy role and the IAM user that can only assume it | created by hand once, removed at teardown |
+| `infra/` | VPC, ALB, RDS, ECS, IAM, log metric filters, alarms, dashboard | created and updated by the pipeline |
+
+### First deployment (by hand, once)
+
+A pipeline cannot create its own credentials, the state bucket or the image registry, so the
+very first deployment runs from a laptop with an AWS admin session:
+
+```bash
+aws login                      # an AWS session with admin rights in the target account
+scripts/first-deploy.sh        # ~15 minutes, mostly RDS; prints the public URL at the end
+```
+
+It runs bootstrap, builds and pushes both images (tagged with the git SHA, built for
+`linux/amd64`), applies `infra/`, runs the database migration as a one-off ECS task, and finishes
+with `scripts/smoke-test.sh`. The working tree must be clean (the image tag is the commit).
+Pass `true` as the first argument to create the database with a standby in a second AZ.
+
+After the deploy, confirm the SNS subscription email once, or alarm emails will not arrive.
+
+### Every later deployment
+
+Pushing to `main` runs the pipeline (see the CI/CD section). To deploy by hand:
+
+```bash
+scripts/smoke-test.sh http://<alb-dns-name>        # check any deployment
+terraform -chdir=infra apply -var image_tag=<git-sha>
+```
+
+### Configuration and secrets
+
+| Setting | Where it comes from on AWS |
+| -- | -- |
+| `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `BASE_URL` | task definition (not secret) |
+| `DB_PASSWORD` | secret created and rotated by RDS in Secrets Manager, injected by ECS at start |
+
+The database password is never in the repo, the images or the Terraform state.
+
+### Teardown
+
+The ALB, RDS and Fargate bill by the hour. Remove everything with:
+
+```bash
+scripts/teardown.sh            # asks for confirmation; destroys infra/, then bootstrap
+```
+
 ## Observability
 
 **Health endpoints**
