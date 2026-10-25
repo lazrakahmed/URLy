@@ -52,3 +52,29 @@ All settings are environment variables (see `.env.example`): `DB_HOST`, `DB_PORT
 `DB_USER`, `DB_PASSWORD` and `BASE_URL` (the public address used to build short links).
 There are no secrets in the repo or in the images; locally they come from `.env`, on AWS from
 Secrets Manager.
+
+## Observability
+
+**Health endpoints**
+
+| Endpoint | Meaning | Touches the DB | Used by |
+| -- | -- | -- | -- |
+| `/healthz` | the process is alive | no | ALB target group, compose healthcheck |
+| `/readyz` | the API can do its job | yes (`SELECT 1`, 2s limit) | humans, post-deploy smoke test |
+
+The load balancer checks `/healthz`, not `/readyz`: a health check should fail only when
+restarting the container would fix it. A database outage must not make the load balancer drop
+every container (users would get a bare 503) or make ECS replace healthy ones in a loop.
+During a DB outage the API answers `503` with `Retry-After: 5` and recovers on its own.
+
+**Logs**: one JSON line per request on stdout (`docker compose logs api` locally, CloudWatch
+Logs on AWS, 14-day retention). Fields: `timestamp`, `level`, `method`, `path`, `status`,
+`duration_ms`, `request_id` (the ALB's `X-Amzn-Trace-Id`), `short_code` on redirects and an
+`event` for notable cases: `link_created`, `code_collision`, `db_error`, `unhandled_error`.
+The Original URL is never logged, and error messages and tracebacks are scrubbed because
+Postgres can include the failing row in an error. `/healthz` is not logged (the ALB calls it
+every few seconds).
+
+**Metrics and alarms** (CloudWatch only, no `/metrics` endpoint): ALB and ECS metrics come for
+free; metric filters count the `db_error`, `code_collision` and `link_created` events;
+alarms on 5xx, latency, unhealthy targets and `db_error` are defined with Terraform.

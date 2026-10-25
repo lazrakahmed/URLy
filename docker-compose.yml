@@ -43,8 +43,8 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
-    healthcheck:  # TCP check for now; story 4 switches it to /healthz
-      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('localhost', 8000), 2)"]
+    healthcheck:  # /healthz = process alive, no DB (a DB outage must not restart containers)
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"]
       interval: 5s
       timeout: 3s
       retries: 10
