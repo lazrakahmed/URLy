@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>URLy</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main>
+    <h1>URLy</h1>
+    <p class="tagline">Paste a long link, get a short one.</p>
+
+    <form id="form" novalidate>
+      <label for="url">Long link</label>
+      <input id="url" name="url" type="url" autocomplete="off" required
+             placeholder="https://example.com/a/very/long/path" aria-describedby="hint error">
+      <p id="hint" class="hint">Full link starting with http:// or https://, up to 2048 characters.</p>
+      <button id="submit" type="submit">Shorten</button>
+    </form>
+
+    <p id="error" class="error" role="alert" hidden></p>
+
+    <section id="result" class="result" hidden aria-live="polite">
+      <h2>Your short link</h2>
+      <div class="row">
+        <a id="result-link" rel="noopener"></a>
+        <button id="copy" type="button">Copy</button>
+      </div>
+    </section>
+
+    <section>
+      <div class="row spread">
+        <h2>Your links</h2>
+        <button id="clear" type="button" class="secondary">Clear list</button>
+      </div>
+      <p class="hint">Saved in this browser only.</p>
+      <ul id="links"></ul>
+      <p id="empty" class="hint">No links yet.</p>
+    </section>
+  </main>
+</body>
+</html>
