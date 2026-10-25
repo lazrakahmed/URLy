@@ -90,11 +90,10 @@ After the deploy, confirm the SNS subscription email once, or alarm emails will 
 
 ### Every later deployment
 
-Pushing to `main` runs the pipeline (see the CI/CD section). To deploy by hand:
+Pushing to `main` runs the pipeline (next section). To check any deployment by hand:
 
 ```bash
-scripts/smoke-test.sh http://<alb-dns-name>        # check any deployment
-terraform -chdir=infra apply -var image_tag=<git-sha>
+scripts/smoke-test.sh http://<alb-dns-name>
 ```
 
 ### Configuration and secrets
@@ -113,6 +112,34 @@ The ALB, RDS and Fargate bill by the hour. Remove everything with:
 ```bash
 scripts/teardown.sh            # asks for confirmation; destroys infra/, then bootstrap
 ```
+
+## CI/CD
+
+`.github/workflows/ci-cd.yml` (GitHub Actions) on every push to `main`:
+
+| Step | What happens | Stops the pipeline when |
+| -- | -- | -- |
+| Test | `pytest` against a Postgres service container, `ruff`, `terraform fmt`/`validate`, `gitleaks` secret scan | any check fails |
+| Build + scan | API and UI images tagged with the commit SHA (never `latest`), Trivy scan | a CRITICAL/HIGH vulnerability with a fix exists |
+| Push | images to ECR (tags are immutable; ECR also scans on push) | - |
+| Migrate | `alembic upgrade head` as a one-off ECS task with the new image | the migration fails |
+| Deploy | `terraform apply -var image_tag=<sha>`: ECS rolling update (100% healthy minimum) with the deployment circuit breaker and automatic rollback, then wait for stability | the new tasks never become healthy |
+| Smoke test | `/readyz`, create a link, follow the redirect, unknown code 404, UI page (retries up to 2 minutes) | any check fails |
+
+Pull requests run the test step and build the images but have no AWS access. Only one deploy
+runs at a time (the next waits); changes to `*.md` files do not deploy.
+
+**Roll back** by redeploying an older commit: Actions -> ci-cd -> Run workflow, with
+`image_tag` set to a previous git SHA (12 characters). Tests and build are skipped; the old
+image is already in ECR.
+
+**Credentials.** GitHub OIDC (no stored key) would be the first choice, but this AWS account
+cannot create the OIDC provider (the Free plan blocks it). Instead a dedicated IAM user
+(`urly-github-deploy`) holds one permission: assume the scoped deploy role. The workflow trades
+its key for a 1-hour role session, so the stored key cannot do anything by itself. The key
+pair is in two GitHub secrets, the role ARN and region in repository variables; none of it is
+in the repo. Switching to OIDC later is a few lines in the workflow. The database password
+never touches the pipeline.
 
 ## Observability
 
