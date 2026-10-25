@@ -1,0 +1,76 @@
+# Local stack: `docker compose up --build`, then open http://localhost:8080
+# Settings come from .env (copy .env.example). Only the gateway publishes a port.
+# This file and gateway/ are local only: on AWS, ECS + ALB + RDS + Secrets Manager replace them.
+
+x-db-env: &db-env
+  DB_HOST: db  # the compose service, not localhost
+  DB_PORT: "5432"
+  DB_NAME: ${DB_NAME:?set it in .env}
+  DB_USER: ${DB_USER:?set it in .env}
+  DB_PASSWORD: ${DB_PASSWORD:?set it in .env}
+
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: ${DB_NAME:?set it in .env}
+      POSTGRES_USER: ${DB_USER:?set it in .env}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set it in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  migrate:  # one-shot: same step the pipeline runs before a deploy (ADR 0002)
+    build: ./api
+    command: ["alembic", "upgrade", "head"]
+    environment: *db-env
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build: ./api
+    environment:
+      <<: *db-env
+      BASE_URL: ${BASE_URL:?set it in .env}
+    deploy:
+      replicas: 2
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:  # TCP check for now; story 4 switches it to /healthz
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('localhost', 8000), 2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  ui:
+    build: ./ui
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  gateway:
+    image: nginx:1.30-alpine
+    volumes:
+      - ./gateway/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "8080:80"
+    depends_on:
+      api:
+        condition: service_healthy
+      ui:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
